@@ -6,3 +6,6 @@
   .hero,.card,.stat{box-shadow:none!important;break-inside:avoid}
   .hero{margin-bottom:12px}
 }
+
+.qrChecks{margin:8px 0 4px;padding:8px;border-radius:10px;background:#f4f6f8;font-size:12px;line-height:1.35}
+.qrChecks span{font-size:11px}
