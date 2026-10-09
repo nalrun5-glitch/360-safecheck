@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { compressImage } from "../lib/photo";
 import QrScanner from "../components/QrScanner";
+import { api, errorText } from "../lib/api";
 const copy = {
   ru: {
     title: "Цифровой предрейсовый круговой осмотр",
@@ -61,30 +62,12 @@ const steps = {
     "Сол алдыңғы аймақ: дөңгелек, шина, қозғалыс алдындағы аймақ",
   ],
 };
-// Код пилота для отчёта /pilot-report (раньше сюда попадал PIN водителя).
+// Код пилота для отчёта /pilot-report.
 const PILOT_CODE = process.env.NEXT_PUBLIC_PILOT_CODE || "KBM-PILOT-2026";
-// Минимум секунд между подтверждениями соседних точек (переход + осмотр зоны).
+// Подсказка в интерфейсе; настоящую проверку делает сервер (sc_min_step_seconds).
 const MIN_STEP_SECONDS = 10;
-// Незавершённый осмотр старше этого срока не восстанавливается.
 const ACTIVE_TTL_MS = 3 * 60 * 60 * 1000;
-const FINAL_STATUSES = [
-  "passed",
-  "hard_stop",
-  "repair_confirmed",
-  "reinspection",
-  "passed_after_repair",
-  "closed",
-];
 
-// «К0001» и «K0001» (кириллица/латиница) считаем одинаковыми.
-const CYR = "АВЕКМНОРСТХ";
-const LAT = "ABEKMHOPCTX";
-function normPin(p) {
-  return (p || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[АВЕКМНОРСТХ]/g, (c) => LAT[CYR.indexOf(c)]);
-}
 function readJSON(key) {
   try {
     return JSON.parse(localStorage.getItem(key) || "null");
@@ -92,14 +75,14 @@ function readJSON(key) {
     return null;
   }
 }
-// Разбор QR-ссылки вида https://…/?vehicle=CODE&checkpoint=N
+// QR-ссылка: https://…/?vehicle=CODE&checkpoint=N&k=TOKEN
 function parseQr(text) {
   try {
     const u = new URL(text, window.location.origin);
     const vehicle = u.searchParams.get("vehicle");
     const checkpoint = Number(u.searchParams.get("checkpoint") || 0);
     if (!vehicle || !checkpoint) return null;
-    return { vehicle, checkpoint };
+    return { vehicle, checkpoint, k: u.searchParams.get("k") || "" };
   } catch {
     return null;
   }
@@ -118,14 +101,13 @@ export default function Home() {
   const [vehicles, setVehicles] = useState([]);
   const [selectedCar, setSelectedCar] = useState(paramCar);
   const car = selectedCar || paramCar;
-  // Последний отсканированный QR (из ссылки камеры телефона или из встроенного сканера)
   const [scan, setScan] = useState(
     paramCar && paramCheckpoint
-      ? { vehicle: paramCar, checkpoint: paramCheckpoint }
+      ? { vehicle: paramCar, checkpoint: paramCheckpoint, k: params.get("k") || "" }
       : null,
   );
   const checkpoint = scan && scan.vehicle === car ? scan.checkpoint : 0;
-  const [recheck, setRecheck] = useState(params?.get("recheck") || "");
+  const [recheck, setRecheck] = useState("");
   const [lang, setLang] = useState(() =>
     typeof window !== "undefined"
       ? localStorage.getItem("safecheck-lang") || "ru"
@@ -143,28 +125,10 @@ export default function Home() {
         : "🚐";
   const [driver, setDriver] = useState("");
   const [pin, setPin] = useState("");
-  // Этап 1 (демо): список пилотных водителей остаётся в клиенте.
-  // Этап 2 (ветка feature/secure-backend): водители и PIN — в Supabase, только хеш.
-  const pilotDrivers = [
-    { name: "Айдос Нұрланұлы", pin: "К0001" },
-    { name: "Ерлан Серікұлы", pin: "К0001" },
-    { name: "Марат Асқарұлы", pin: "К0001" },
-    { name: "Данияр Болатұлы", pin: "К0001" },
-    { name: "Нұржан Әлиұлы", pin: "К0001" },
-    { name: "Серік Бауыржанұлы", pin: "К0001" },
-    { name: "Арман Талғатұлы", pin: "К0001" },
-    { name: "Бекзат Ермекұлы", pin: "К0001" },
-    { name: "Қайрат Асқарұлы", pin: "К0001" },
-    { name: "Руслан Маратұлы", pin: "К0001" },
-    { name: "Нұрбол Дәулетұлы", pin: "К0001" },
-    { name: "Самат Жандосұлы", pin: "К0001" },
-    { name: "Азамат Берікұлы", pin: "К0001" },
-    { name: "Ермек Қанатұлы", pin: "К0001" },
-    { name: "Талғат Нұрланұлы", pin: "К0001" },
-  ];
+  const [driverNames, setDriverNames] = useState([]);
+  // session: { token, name, expires_at } — PIN в браузере не хранится
   const [session, setSession] = useState(null);
   const [loginError, setLoginError] = useState("");
-  // inspection: { id, startedAt, lastStepAt } — время в мс, переживает перезагрузку страницы
   const [inspection, setInspection] = useState(null);
   const [vehicleConfirmed, setVehicleConfirmed] = useState(false);
   const [i, setI] = useState(0);
@@ -192,75 +156,110 @@ export default function Home() {
     const a = { ...(readJSON("safecheck-active") || {}), ...patch };
     localStorage.setItem("safecheck-active", JSON.stringify(a));
   }
+  // Применить состояние осмотра, которое вернул сервер
+  function applyState(s, vehicleCode) {
+    const startedAt = new Date(s.started_at).getTime();
+    const lastStepAt = new Date(s.last_step_at || s.started_at).getTime();
+    setInspection({ id: s.id, startedAt, lastStepAt });
+    setI(Math.min(5, s.steps_done));
+    setHasCritical(!!s.has_critical);
+    setRecheck(s.recheck_of || "");
+    setDone(!!s.completed);
+    if (s.completed) localStorage.removeItem("safecheck-active");
+    else
+      localStorage.setItem(
+        "safecheck-active",
+        JSON.stringify({
+          id: s.id,
+          vehicle: vehicleCode,
+          step: s.steps_done,
+          startedAt,
+          lastStepAt,
+        }),
+      );
+  }
+  function dropSession() {
+    localStorage.removeItem("safecheck-driver-session");
+    setSession(null);
+    setDriver("");
+  }
 
-  // Вход водителя и восстановление незавершённого осмотра
   useEffect(() => {
+    api
+      .driverNames()
+      .then((n) => setDriverNames(n || []))
+      .catch(() => {});
     let saved = readJSON("safecheck-driver-session");
-    if (saved?.demo || String(saved?.no || "").startsWith("DEMO-")) {
+    if (
+      !saved?.token ||
+      (saved.expires_at && new Date(saved.expires_at) < new Date())
+    ) {
       localStorage.removeItem("safecheck-driver-session");
       saved = null;
     }
     let active = readJSON("safecheck-active");
-    if (
-      active &&
-      (!active.id ||
-        !active.startedAt ||
-        Date.now() - active.startedAt > ACTIVE_TTL_MS)
-    ) {
+    if (active && (!active.id || Date.now() - active.startedAt > ACTIVE_TTL_MS)) {
       localStorage.removeItem("safecheck-active");
       active = null;
     }
-    // Осмотр продолжается, если QR-ссылка того же ТС (или ссылка без ТС)
-    const activeMatches =
-      active && (!paramCar || paramCar === active.vehicle) && saved?.name;
+    const activeMatches = active && (!paramCar || paramCar === active.vehicle);
     const continuing =
-      paramCheckpoint > 0 ||
-      params?.get("resume") === "1" ||
-      !!params?.get("recheck") ||
-      !!activeMatches;
-    if (continuing && saved?.no && saved?.name) {
-      setSession(saved);
-      setDriver(saved.name);
-    } else {
+      paramCheckpoint > 0 || params?.get("resume") === "1" || !!activeMatches;
+    if (!(continuing && saved)) {
       setSession(null);
       setDriver("");
-      setPin("");
-    }
-    if (activeMatches && continuing) {
-      setSelectedCar(active.vehicle);
-      setInspection({
-        id: active.id,
-        startedAt: active.startedAt,
-        lastStepAt: active.lastStepAt || active.startedAt,
-      });
-      setI(active.step || 0);
-      setHasCritical(!!active.critical);
-      if (active.recheck) setRecheck(active.recheck);
-    }
-  }, []);
-
-  function login() {
-    const u = pilotDrivers.find(
-      (x) => x.name === driver && normPin(x.pin) === normPin(pin),
-    );
-    if (!u) {
-      setLoginError(
-        lang === "ru"
-          ? "Выберите ФИО и введите свой табельный номер"
-          : "Аты-жөніңізді таңдап, табельдік нөміріңізді енгізіңіз",
-      );
       return;
     }
-    const saved = { no: u.pin, name: u.name };
-    localStorage.setItem("safecheck-driver-session", JSON.stringify(saved));
     setSession(saved);
-    setPin("");
-    setLoginError("");
+    setDriver(saved.name);
+    if (!activeMatches) return;
+    setSelectedCar(active.vehicle);
+    // Сначала — из локальной копии (работает без сети), затем сверяем с сервером
+    applyState(
+      {
+        id: active.id,
+        started_at: active.startedAt,
+        last_step_at: active.lastStepAt,
+        steps_done: active.step || 0,
+        has_critical: false,
+      },
+      active.vehicle,
+    );
+    if (navigator.onLine)
+      api
+        .inspectionState(saved.token, active.id)
+        .then((s) => applyState(s, active.vehicle))
+        .catch((e) => {
+          if (/SC_SESSION/.test(e.message)) dropSession();
+          if (/SC_NOT_YOURS/.test(e.message)) {
+            localStorage.removeItem("safecheck-active");
+            setInspection(null);
+          }
+        });
+  }, []);
+
+  async function login() {
+    if (!driver || !pin.trim())
+      return setLoginError(
+        lang === "ru"
+          ? "Выберите ФИО и введите PIN"
+          : "Аты-жөніңізді таңдап, PIN енгізіңіз",
+      );
+    setBusy(true);
+    try {
+      const s = await api.driverLogin(driver, pin);
+      localStorage.setItem("safecheck-driver-session", JSON.stringify(s));
+      setSession(s);
+      setPin("");
+      setLoginError("");
+    } catch (e) {
+      setLoginError(errorText(e, lang));
+    }
+    setBusy(false);
   }
   function logout() {
-    localStorage.removeItem("safecheck-driver-session");
-    setSession(null);
-    setDriver("");
+    if (session?.token) api.driverLogout(session.token).catch(() => {});
+    dropSession();
     setProfileOpen(false);
   }
   useEffect(() => {
@@ -325,7 +324,6 @@ export default function Home() {
     setMode(r);
     setError("");
     if (r === "ok") {
-      // «Исправно» не может быть критическим дефектом
       setCritical(false);
       setComment("");
       setPhoto(null);
@@ -336,9 +334,7 @@ export default function Home() {
     const q = parseQr(text);
     if (!q)
       return setError(
-        lang === "ru"
-          ? "Это не QR-код SafeCheck"
-          : "Бұл SafeCheck QR-коды емес",
+        lang === "ru" ? "Это не QR-код SafeCheck" : "Бұл SafeCheck QR-коды емес",
       );
     if (q.vehicle !== car)
       return setError(
@@ -356,21 +352,8 @@ export default function Home() {
     setScan(q);
   }
 
-  // Последний завершённый статус ТС: открытый HARD STOP блокирует новый осмотр,
-  // подтверждённый механиком ремонт превращает осмотр в повторный.
-  async function lastVehicleStatus(vehicleId) {
-    const { data } = await supabase
-      .from("inspections")
-      .select("id,status,started_at")
-      .eq("vehicle_id", vehicleId)
-      .in("status", FINAL_STATUSES)
-      .order("started_at", { ascending: false })
-      .limit(1);
-    return data?.[0] || null;
-  }
-
   async function start() {
-    if (!session || !driver)
+    if (!session)
       return setError(
         lang === "ru"
           ? "Сначала авторизуйтесь как водитель"
@@ -379,81 +362,12 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      const { data: v, error: ve } = await supabase
-        .from("vehicles")
-        .select("id")
-        .eq("code", car)
-        .single();
-      if (ve || !v)
-        throw new Error(
-          lang === "ru" ? "ТС не найдено в системе" : "Көлік жүйеде табылмады",
-        );
-      let recheckId = recheck;
-      const last = await lastVehicleStatus(v.id);
-      if (!recheckId && last?.status === "hard_stop")
-        throw new Error(
-          lang === "ru"
-            ? "ТС заблокировано: открыт HARD STOP. Выезд возможен только после ремонта и повторного осмотра."
-            : "Көлік бұғатталған: HARD STOP ашық. Жөндеу мен қайта тексеруден кейін ғана шығуға болады.",
-        );
-      if (
-        !recheckId &&
-        ["repair_confirmed", "reinspection"].includes(last?.status)
-      )
-        recheckId = last.id;
-      if (recheckId) {
-        const { data: old, error: oe } = await supabase
-          .from("inspections")
-          .select("id,status")
-          .eq("id", recheckId)
-          .eq("vehicle_id", v.id)
-          .single();
-        if (oe || !["repair_confirmed", "reinspection"].includes(old?.status))
-          throw new Error(
-            lang === "ru"
-              ? "Повторный осмотр недоступен"
-              : "Қайта тексеру қолжетімсіз",
-          );
-        if (old.status === "repair_confirmed") {
-          const { error: ue } = await supabase
-            .from("inspections")
-            .update({ status: "reinspection" })
-            .eq("id", recheckId);
-          if (ue) throw ue;
-        }
-      }
-      const { data, error } = await supabase
-        .from("inspections")
-        .insert({
-          vehicle_id: v.id,
-          driver_name: driver.trim(),
-          pilot_code: PILOT_CODE,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-      const startedAt = Date.now();
-      setRecheck(recheckId || "");
-      setInspection({ id: data.id, startedAt, lastStepAt: startedAt });
-      setI(0);
-      setHasCritical(false);
-      setNow(startedAt);
-      localStorage.setItem(
-        "safecheck-active",
-        JSON.stringify({
-          id: data.id,
-          vehicle: car,
-          driver: driver.trim(),
-          step: 0,
-          saved: 0,
-          critical: false,
-          recheck: recheckId || "",
-          startedAt,
-          lastStepAt: startedAt,
-        }),
-      );
+      const s = await api.startInspection(session.token, car, PILOT_CODE);
+      applyState(s, car);
+      setNow(Date.now());
     } catch (e) {
-      setError(e.message);
+      if (/SC_SESSION/.test(e.message)) dropSession();
+      setError(errorText(e, lang));
     }
     setBusy(false);
   }
@@ -469,6 +383,7 @@ export default function Home() {
       return false;
     }
   }
+  // Офлайн-очередь отправляется по порядку; сервер сам отбрасывает повторы.
   async function syncPending() {
     if (!navigator.onLine) return;
     let q = [];
@@ -477,32 +392,20 @@ export default function Home() {
     } catch {}
     if (!q.length) return;
     const left = [];
+    let blocked = false;
     for (const item of q) {
-      try {
-        if (item.type === "inspection_item") {
-          const { error } = await supabase
-            .from("inspection_items")
-            .insert(item.payload);
-          if (error && error.code !== "23505") throw error;
-        } else if (item.type === "inspection_complete") {
-          const { error } = await supabase
-            .from("inspections")
-            .update(item.payload)
-            .eq("id", item.inspection_id);
-          if (error) throw error;
-        } else if (item.type === "recheck_result") {
-          const { error: le } = await supabase
-            .from("recheck_log")
-            .insert(item.log);
-          if (le) throw le;
-          const { error: ue } = await supabase
-            .from("inspections")
-            .update({ status: item.status })
-            .eq("id", item.recheck_id);
-          if (ue) throw ue;
-        }
-      } catch {
+      if (blocked || item.type !== "record_step") {
         left.push(item);
+        continue;
+      }
+      try {
+        await api.recordStep(item.args);
+      } catch (e) {
+        // Ошибка проверки — запись не будет принята никогда, её не держим
+        if (!/SC_/.test(e.message)) {
+          left.push(item);
+          blocked = true;
+        }
       }
     }
     localStorage.setItem("safecheck-pending", JSON.stringify(left));
@@ -526,13 +429,7 @@ export default function Home() {
       .publicUrl;
   }
   async function save() {
-    if (!scan || scan.vehicle !== car)
-      return setError(
-        lang === "ru"
-          ? "QR-код относится к другому транспортному средству"
-          : "QR-код басқа көлікке тиесілі",
-      );
-    if (checkpoint !== i + 1)
+    if (!scan || scan.vehicle !== car || checkpoint !== i + 1)
       return setError(
         (lang === "ru"
           ? "Сначала отсканируйте QR контрольной точки №"
@@ -552,15 +449,11 @@ export default function Home() {
       );
     if (mode === "defect" && !comment.trim())
       return setError(
-        lang === "ru"
-          ? "Опишите выявленный дефект"
-          : "Анықталған ақауды сипаттаңыз",
+        lang === "ru" ? "Опишите выявленный дефект" : "Анықталған ақауды сипаттаңыз",
       );
     if (mode === "defect" && !photo && navigator.onLine)
       return setError(
-        lang === "ru"
-          ? "Сфотографируйте дефект"
-          : "Ақауды суретке түсіріңіз",
+        lang === "ru" ? "Сфотографируйте дефект" : "Ақауды суретке түсіріңіз",
       );
     setBusy(true);
     setError("");
@@ -568,94 +461,46 @@ export default function Home() {
       const stepNo = i + 1;
       const stepAt = Date.now();
       const isCritical = mode === "defect" && critical;
-      const alreadySaved = (readJSON("safecheck-active")?.saved || 0) >= stepNo;
-      if (!alreadySaved) {
-        if (!navigator.onLine && mode === "defect" && photo)
-          throw new Error(
-            lang === "ru"
-              ? "Для сохранения фото дефекта требуется сеть. Уберите фото, чтобы сохранить описание офлайн."
-              : "Ақау фотосын сақтау үшін желі қажет. Сипаттаманы офлайн сақтау үшін фотоны алып тастаңыз.",
-          );
-        const photo_url = mode === "defect" ? await upload() : null;
-        const itemPayload = {
-          inspection_id: inspection.id,
-          step_no: stepNo,
-          zone: steps.ru[i],
-          result: mode,
-          critical: isCritical,
-          comment: mode === "defect" ? comment.trim() : null,
-          photo_url,
-          scanned_at: new Date(stepAt).toISOString(),
-          seconds_from_start: Math.floor((stepAt - inspection.startedAt) / 1000),
+      const offline = !navigator.onLine;
+      if (offline && mode === "defect" && photo)
+        throw new Error(
+          lang === "ru"
+            ? "Для сохранения фото дефекта требуется сеть. Уберите фото, чтобы сохранить описание офлайн."
+            : "Ақау фотосын сақтау үшін желі қажет. Сипаттаманы офлайн сақтау үшін фотоны алып тастаңыз.",
+        );
+      const args = {
+        p_token: session.token,
+        p_inspection: inspection.id,
+        p_step: stepNo,
+        p_qr: scan.k || "",
+        p_result: mode,
+        p_critical: isCritical,
+        p_comment: mode === "defect" ? comment.trim() : null,
+        p_photo_url: mode === "defect" && !offline ? await upload() : null,
+        p_scanned_at: new Date(stepAt).toISOString(),
+        p_offline: offline,
+      };
+      let state;
+      if (offline) {
+        queueOffline({ type: "record_step", args });
+        state = {
+          id: inspection.id,
+          started_at: inspection.startedAt,
+          last_step_at: stepAt,
+          steps_done: stepNo,
+          has_critical: hasCritical || isCritical,
+          recheck_of: recheck,
+          completed: false,
         };
-        if (!navigator.onLine) {
-          queueOffline({ type: "inspection_item", payload: itemPayload });
-        } else {
-          const { error: e } = await supabase
-            .from("inspection_items")
-            .insert(itemPayload);
-          if (e && e.code !== "23505") throw e;
-        }
-        saveActive({
-          saved: stepNo,
-          critical: hasCritical || isCritical,
-          lastStepAt: stepAt,
-        });
-      }
-      const hc = hasCritical || isCritical;
-      setHasCritical(hc);
-      if (i === 5) {
-        const finishPayload = {
-          status: hc ? "hard_stop" : "passed",
-          completed_at: new Date().toISOString(),
-        };
-        if (!navigator.onLine)
-          queueOffline({
-            type: "inspection_complete",
-            inspection_id: inspection.id,
-            payload: finishPayload,
-          });
-        else {
-          const { error: fe } = await supabase
-            .from("inspections")
-            .update(finishPayload)
-            .eq("id", inspection.id);
-          if (fe) throw fe;
-        }
-        if (recheck) {
-          const log = {
-            inspection_id: recheck,
-            inspector_name: driver.trim(),
-            result: hc ? "failed" : "passed",
-            comment: hc
-              ? "Повторно выявлен критический дефект"
-              : "Повторный 360°-осмотр пройден",
-          };
-          const status = hc ? "hard_stop" : "passed_after_repair";
-          if (!navigator.onLine)
-            queueOffline({
-              type: "recheck_result",
-              recheck_id: recheck,
-              log,
-              status,
-            });
-          else {
-            const { error: le } = await supabase.from("recheck_log").insert(log);
-            if (le) throw le;
-            const { error: ue } = await supabase
-              .from("inspections")
-              .update({ status })
-              .eq("id", recheck);
-            if (ue) throw ue;
-          }
-        }
-        localStorage.removeItem("safecheck-active");
-        setDone(true);
       } else {
-        const n = i + 1;
-        setI(n);
-        setInspection({ ...inspection, lastStepAt: stepAt });
-        saveActive({ step: n, lastStepAt: stepAt });
+        state = await api.recordStep(args);
+      }
+      applyState(state, car);
+      if (stepNo === 6) {
+        // Итоговый статус выставляет сервер; офлайн — показываем предварительный итог
+        setDone(true);
+        localStorage.removeItem("safecheck-active");
+      } else {
         window.history.replaceState(
           {},
           "",
@@ -668,13 +513,15 @@ export default function Home() {
       setComment("");
       setPhoto(null);
     } catch (e) {
-      setError(e.message);
+      if (/SC_SESSION/.test(e.message)) dropSession();
+      if (/SC_QR_INVALID/.test(e.message)) setScan(null);
+      setError(errorText(e, lang));
     }
     setBusy(false);
   }
   const vehicleState = done
     ? hasCritical
-      ? ["stop", lang === "ru" ? "HARD STOP" : "HARD STOP"]
+      ? ["stop", "HARD STOP"]
       : ["ready", lang === "ru" ? "ДОПУЩЕНО" : "РҰҚСАТ"]
     : inspection
       ? ["ready", lang === "ru" ? "ИДЁТ ОСМОТР" : "ТЕКСЕРУ ЖҮРУДЕ"]
@@ -797,7 +644,8 @@ export default function Home() {
             value={driver}
             onChange={(e) => {
               setDriver(e.target.value);
-              setPin("");              setLoginError("");
+              setPin("");
+              setLoginError("");
             }}
           >
             <option value="">
@@ -805,23 +653,25 @@ export default function Home() {
                 ? "Выберите своё ФИО"
                 : "Өз аты-жөніңізді таңдаңыз"}
             </option>
-            {pilotDrivers.map((u) => (
-              <option key={u.name} value={u.name}>
-                {u.name}
+            {driverNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
               </option>
             ))}
           </select>
           <label>
-            {lang === "ru" ? "Пароль водителя" : "Жүргізуші құпиясөзі"}
+            {lang === "ru" ? "PIN водителя" : "Жүргізуші PIN-коды"}
           </label>
           <input
             type="password"
             value={pin}
             onChange={(e) => setPin(e.target.value)}
-            placeholder={lang === "ru" ? "Табельный номер" : "Табельдік нөмір"}
+            inputMode="numeric"
+            autoComplete="off"
+            placeholder={lang === "ru" ? "PIN из 6 цифр" : "6 саннан тұратын PIN"}
           />
           {loginError && <p className="bad pad">{loginError}</p>}
-          <button className="btn primary" onClick={login}>
+          <button className="btn primary" disabled={busy} onClick={login}>
             {lang === "ru" ? "Продолжить к выбору ТС" : "Көлікті таңдауға өту"}
           </button>
         </section>
@@ -847,8 +697,7 @@ export default function Home() {
                 {lang === "ru" ? "Транспортное средство" : "Көлік құралы"}
               </div>
               {!inspection && vehicles.length > 0 ? (
-                <select
-                  className="vehicleSelect"
+                <select                  className="vehicleSelect"
                   value={car}
                   onChange={chooseVehicle}
                 >
