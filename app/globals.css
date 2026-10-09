@@ -10,3 +10,12 @@
 .qrChecks{margin:8px 0 4px;padding:8px;border-radius:10px;background:#f4f6f8;font-size:12px;line-height:1.35}
 .qrChecks span{font-size:11px}
 .brandHead{display:flex;align-items:center;gap:12px;margin-bottom:12px}.kbmLogo{width:58px;height:58px;object-fit:contain;background:#fff;border-radius:12px;padding:3px}.brandText{display:flex;flex-direction:column;gap:3px}.brandText b{font-size:14px}.brandText span{font-size:12px;opacity:.85}@media(max-width:500px){.kbmLogo{width:50px;height:50px}.brandText b{font-size:12px}}.pinHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.pinHead b{font-size:20px}.pinBadge{background:#e7f0ff;color:#075bc8;padding:6px 10px;border-radius:99px;font-weight:900}.pinInput{font-size:22px;font-weight:900;letter-spacing:2px;border:2px solid #0b68d1}.pinExamples{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:12px}.pinExamples button{border:1px solid #d3dee7;background:#f6f9fb;border-radius:9px;padding:9px;font-weight:800;cursor:pointer}@media(max-width:500px){.pinExamples{grid-template-columns:repeat(2,1fr)}}
+/* --- fix/demo-stability --- */
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn.ok,.btn.danger{opacity:.75}
+.btn.ok.active,.btn.danger.active{opacity:1;box-shadow:0 0 0 3px rgba(11,104,209,.35)}
+.vehicleStatus.stop{background:#fdecec;color:#bd2c2c}
+.scanAction .btn{width:100%;margin:10px 0 6px}
+.scannerOverlay{position:fixed;inset:0;background:rgba(5,20,35,.82);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+.scannerBox{background:#fff;border-radius:16px;padding:16px;width:100%;max-width:420px;text-align:center}
+.scannerVideo{width:100%;border-radius:12px;margin-top:10px;background:#000;aspect-ratio:1/1;object-fit:cover}
