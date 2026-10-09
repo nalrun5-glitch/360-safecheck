@@ -797,8 +797,7 @@ export default function Home() {
             value={driver}
             onChange={(e) => {
               setDriver(e.target.value);
-              setPin("");
-              setLoginError("");
+              setPin("");              setLoginError("");
             }}
           >
             <option value="">
@@ -998,3 +997,167 @@ export default function Home() {
               >
                 {busy ? "..." : t.start}
               </button>
+              {!vehicleConfirmed && (
+                <p className="small muted">
+                  {lang === "ru"
+                    ? "Сначала выберите и подтвердите транспортное средство."
+                    : "Алдымен көлікті таңдап, таңдауды растаңыз."}
+                </p>
+              )}
+            </section>
+          ) : !done ? (
+            <section className="card">
+              <div className="inspectionHead">
+                <b>
+                  {lang === "ru" ? "Точка" : "Нүкте"} {i + 1}{" "}
+                  {lang === "ru" ? "из" : "/"} 6 ·{" "}
+                  {lang === "ru" ? "пройдено" : "өтті"} {i}
+                </b>
+                <span>
+                  ⏱ {Math.floor(elapsed / 60)}:
+                  {String(elapsed % 60).padStart(2, "0")}
+                </span>
+              </div>
+              <div className="progress">
+                <div
+                  className="bar"
+                  style={{ width: (i / 6) * 100 + "%" }}
+                />
+              </div>
+              <div className="step">
+                <div className="num">{i + 1}</div>
+                <div>
+                  <b>{zones[i]}</b>
+                  <div className="small muted">{t.scanHint}</div>
+                </div>
+              </div>
+              <div
+                className={
+                  checkpoint === i + 1 ? "checkpoint good" : "checkpoint"
+                }
+              >
+                {t.scan}:{" "}
+                {checkpoint === i + 1
+                  ? "✓ QR " + (i + 1)
+                  : lang === "ru"
+                    ? "ожидается QR " + (i + 1)
+                    : "QR " + (i + 1) + " күтілуде"}
+              </div>
+              {checkpoint !== i + 1 && (
+                <div className="scanAction">
+                  <div className="scanPulse">⌁</div>
+                  <b>
+                    {lang === "ru"
+                      ? "Перейдите к точке №" + (i + 1) + " и отсканируйте QR"
+                      : "№" + (i + 1) + " нүктеге өтіп, QR сканерлеңіз"}
+                  </b>
+                  <button
+                    className="btn primary"
+                    onClick={() => {
+                      setError("");
+                      setScannerOpen(true);
+                    }}
+                  >
+                    {lang === "ru" ? "Сканировать QR" : "QR сканерлеу"}
+                  </button>
+                  <small>
+                    {lang === "ru"
+                      ? "Без QR этой точки продолжить нельзя"
+                      : "Осы нүктенің QR-ынсыз жалғастыру мүмкін емес"}
+                  </small>
+                </div>
+              )}
+              {checkpoint === i + 1 && (
+                <>
+                  <div className="row">
+                    <button
+                      className={"btn ok" + (mode === "ok" ? " active" : "")}
+                      onClick={() => chooseResult("ok")}>
+                      {t.ok}
+                    </button>
+                    <button
+                      className={
+                        "btn danger" + (mode === "defect" ? " active" : "")
+                      }
+                      onClick={() => chooseResult("defect")}
+                    >
+                      {t.defect}
+                    </button>
+                  </div>
+                  {mode === "defect" && (
+                    <div>
+                      <label>{t.comment}</label>
+                      <textarea
+                        value={comment}
+                        onChange={(e) => setComment(e.target.value)}
+                      />
+                      <label>{t.photo}</label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={(e) => setPhoto(e.target.files?.[0] || null)}
+                      />
+                      <label>
+                        <input
+                          className="check"
+                          type="checkbox"
+                          checked={critical}
+                          onChange={(e) => setCritical(e.target.checked)}
+                        />
+                        {t.critical}
+                      </label>
+                    </div>
+                  )}
+                  {mode && (
+                    <button
+                      className="btn primary"
+                      disabled={busy}
+                      onClick={save}
+                    >
+                      {busy ? "..." : i === 5 ? t.finish : t.next}
+                    </button>
+                  )}
+                </>
+              )}
+              {error && <p className="bad pad">{error}</p>}
+            </section>
+          ) : (
+            <section className="card">
+              {hasCritical ? (
+                <>
+                  <div className="stop">{t.stop}</div>
+                  <p>
+                    {lang === "ru"
+                      ? "Критический дефект передан контрольному механику. Допуск возможен только после устранения и закрытия."
+                      : "Сындарлы ақау бақылаушы механикке жіберілді. Ақау жойылып, жабылғаннан кейін ғана рұқсат беріледі."}
+                  </p>
+                  <a className="btn danger link" href="/mechanic">
+                    {lang === "ru" ? "Кабинет механика" : "Механик кабинеті"}
+                  </a>
+                </>
+              ) : (
+                <>
+                  <div className="badge">{t.passed}</div>
+                  <p>
+                    {lang === "ru"
+                      ? "Все 6 физических контрольных точек подтверждены QR-сканированием."
+                      : "Барлық 6 физикалық бақылау нүктесі QR сканерлеумен расталды."}
+                  </p>
+                </>
+              )}
+            </section>
+          )}
+        </>
+      )}
+      {scannerOpen && (
+        <QrScanner
+          lang={lang}
+          onResult={onScanned}
+          onClose={() => setScannerOpen(false)}
+        />
+      )}
+      <div className="footer">360° SafeCheck · АО «Каражанбасмунай»</div>
+    </main>
+  );
+}
